@@ -1,0 +1,21 @@
+FROM node:20-slim
+
+# Installazione dipendenze
+RUN apt-get update && apt-get install -y \
+    git \
+    ffmpeg \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configurazione ambiente
+WORKDIR /app
+COPY package.json .
+COPY video-processor.js .
+
+RUN npm install mongodb axios dotenv
+
+# Volume persistente
+VOLUME ["/data"]
+
+# Avvio worker
+CMD ["node", "video-processor.js"]
