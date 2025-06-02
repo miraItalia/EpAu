@@ -11,7 +11,7 @@ const config = {
   STATE_FILE: '/data/state.json',
   MAX_REPO_SIZE: 4.5 * 1024 * 1024 * 1024, // 4.5 GB
   REPO_PREFIX: 'miraEp',
-  GITHUB_OWNER: 'tuo_username_github',
+  GITHUB_OWNER: 'miraItalia',
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
   GITHUB_TOKEN: process.env.GITHUB_TOKEN,
