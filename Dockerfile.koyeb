@@ -1,23 +1,18 @@
-# Usa immagine base Python leggera
-FROM python:3.11-slim
+FROM atmoz/sftp:latest
 
-# Installiamo ffmpeg (dipendenze di sistema)
-RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
+# Installa python3, pip e ffmpeg
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip ffmpeg && \
+    apt-get clean
 
-# Crea cartella app e settiamo working directory
 WORKDIR /app
 
-# Copia requirements (crealo tu o usa inline)
 COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Installa dipendenze Python
-RUN pip install --no-cache-dir -r requirements.txt
+COPY worker.py .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
-# Copia il codice
-COPY main.py .
-
-# Espone porta 80
-EXPOSE 80
-
-# Comando per avviare il server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["sftpuser:Pass123:upload"]
