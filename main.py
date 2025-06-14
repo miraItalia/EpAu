@@ -9,10 +9,10 @@ from botocore.client import Config
 app = FastAPI()
 
 # Config Cloudflare R2
-R2_ENDPOINT = "https://<your-account-id>.r2.cloudflarestorage.com"
-R2_ACCESS_KEY = "<your-access-key>"
-R2_SECRET_KEY = "<your-secret-key>"
-R2_BUCKET = "<your-bucket-name>"
+R2_ENDPOINT = "https://215eadb91637dbe987d398cacd006847.r2.cloudflarestorage.com/episodimira1"
+R2_ACCESS_KEY = "2c789715a2475c14e5d5acd2a828c63a"
+R2_SECRET_KEY = "b9b99d9a6155bbd321b336beff7d49e3ebc74bb24905d51bbd8383f7b42b6f81"
+R2_BUCKET = "episodimira1"
 
 session = boto3.session.Session()
 s3 = session.client(
