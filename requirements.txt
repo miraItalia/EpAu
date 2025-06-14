@@ -1,4 +1,4 @@
-fastapi
-uvicorn[standard]
 boto3
-ffmpeg-python
+pymongo
+watchdog
+python-dotenv
