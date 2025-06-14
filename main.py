@@ -1,84 +1,81 @@
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
 import os
-import uuid
-import subprocess
+import time
 import boto3
-from botocore.client import Config
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
-app = FastAPI()
+load_dotenv()
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+# Variabili d'ambiente
+R2_ENDPOINT = os.getenv("R2_ENDPOINT")
+R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
+R2_BUCKET = os.getenv("R2_BUCKET")
+MONGO_URI = os.getenv("MONGO_URI")
 
-# Config Cloudflare R2
-R2_ENDPOINT = "https://215eadb91637dbe987d398cacd006847.r2.cloudflarestorage.com/episodimira1"
-R2_ACCESS_KEY = "2c789715a2475c14e5d5acd2a828c63a"
-R2_SECRET_KEY = "b9b99d9a6155bbd321b336beff7d49e3ebc74bb24905d51bbd8383f7b42b6f81"
-R2_BUCKET = "episodimira1"
+# Configura boto3 per R2
+s3 = boto3.client('s3',
+                  endpoint_url=R2_ENDPOINT,
+                  aws_access_key_id=R2_ACCESS_KEY,
+                  aws_secret_access_key=R2_SECRET_KEY)
 
-session = boto3.session.Session()
-s3 = session.client(
-    "s3",
-    region_name="auto",
-    endpoint_url=R2_ENDPOINT,
-    aws_access_key_id=R2_ACCESS_KEY,
-    aws_secret_access_key=R2_SECRET_KEY,
-    config=Config(signature_version="s3v4"),
-)
+# Configura MongoDB
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client['MiraculousItalia']
+episodi = db['episodi']
 
-TMP_DIR = "/tmp/uploads"
+UPLOAD_FOLDER = "/home/sftpuser/upload"
 
-os.makedirs(TMP_DIR, exist_ok=True)
+def process_file(path):
+    print(f"Processo file: {path}")
+    filename = os.path.basename(path)
 
-def convert_to_hls(input_path, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    cmd = [
-        "ffmpeg",
-        "-i", input_path,
-        "-codec:", "copy",
-        "-start_number", "0",
-        "-hls_time", "10",
-        "-hls_list_size", "0",
-        "-f", "hls",
-        os.path.join(output_dir, "index.m3u8"),
-    ]
-    subprocess.run(cmd, check=True)
+    # Upload diretto su R2
+    with open(path, 'rb') as f:
+        s3.upload_fileobj(f, R2_BUCKET, filename)
+    print(f"Caricato {filename} su R2")
 
-def upload_folder_to_r2(folder_path, r2_folder):
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            full_path = os.path.join(root, file)
-            key = os.path.join(r2_folder, file)
-            s3.upload_file(full_path, R2_BUCKET, key)
+    # Aggiorna MongoDB usando nome file per stagione e episodio
+    # Esempio nome file: IT101_xyz123.mp4
+    # Prendiamo i 3 numeri: 101 -> stagione 1 episodio 01
+    stagione = int(filename[2])
+    episodio = int(filename[3:5])
 
-@app.post("/upload/")
-async def upload(files: list[UploadFile] = File(...)):
-    results = []
-    for file in files:
-        # salva file temporaneo
-        uid = str(uuid.uuid4())
-        video_path = os.path.join(TMP_DIR, f"{uid}_{file.filename}")
-        with open(video_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+    url_file = f"https://{R2_BUCKET}.r2.cloudflarestorage.com/{filename}"
 
-        # crea cartella output HLS
-        hls_output = os.path.join(TMP_DIR, f"hls_{uid}")
-        convert_to_hls(video_path, hls_output)
+    # Aggiorna documento episodio
+    filter_query = {'season': stagione, 'episodeNumber': episodio}
+    update_data = {'$set': {'videoUrl': url_file}}
 
-        # upload su R2
-        r2_folder = f"episodes/{uid}"
-        upload_folder_to_r2(hls_output, r2_folder)
+    result = episodi.update_one(filter_query, update_data)
+    if result.matched_count == 0:
+        print(f"Nessun episodio trovato per S{stagione}E{episodio}, creazione nuovo.")
+        episodi.insert_one({
+            'season': stagione,
+            'episodeNumber': episodio,
+            'videoUrl': url_file,
+            'title': 'Unknown',
+            'slug': f'{stagione}x{episodio:02d}-unknown'
+        })
 
-        # pulizia
-        os.remove(video_path)
-        for root, _, files in os.walk(hls_output):
-            for f_name in files:
-                os.remove(os.path.join(root, f_name))
-        os.rmdir(hls_output)
+class UploadHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.endswith('.mp4'):
+            # Aspetta un attimo per sicurezza
+            time.sleep(2)
+            process_file(event.src_path)
 
-        results.append({"filename": file.filename, "r2_path": r2_folder})
-
-    return JSONResponse({"uploaded": results})
+if __name__ == "__main__":
+    event_handler = UploadHandler()
+    observer = Observer()
+    observer.schedule(event_handler, UPLOAD_FOLDER, recursive=False)
+    observer.start()
+    print("Watcher avviato, in attesa di nuovi file...")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
