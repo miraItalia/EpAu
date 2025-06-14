@@ -1,21 +1,20 @@
-FROM node:20-slim
+FROM python:3.11-slim
 
-# Installazione dipendenze
-RUN apt-get update && apt-get install -y \
-    git \
-    ffmpeg \
-    python3 \
-    && rm -rf /var/lib/apt/lists/*
+# Installa ffmpeg (dipendenza per conversione video)
+RUN apt-get update && apt-get install -y ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Configurazione ambiente
+# Crea cartelle per upload e output
+RUN mkdir /app /app/upload /app/episodi
 WORKDIR /app
-COPY package.json .
-COPY video-processor.js .
 
-RUN npm install mongodb axios dotenv
+# Copia lo script Python dentro il container
+COPY main.py .
 
-# Volume persistente
-VOLUME ["/data"]
+# Installa dipendenze Python
+RUN pip install pyftpdlib watchdog boto3
 
-# Avvio worker
-CMD ["node", "video-processor.js"]
+# Espone la porta FTP (puoi modificarla se vuoi)
+EXPOSE 21
+
+# Comando per avviare lo script Python
+CMD ["python", "main.py"]
