@@ -8,6 +8,10 @@ from botocore.client import Config
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
 # Config Cloudflare R2
 R2_ENDPOINT = "https://215eadb91637dbe987d398cacd006847.r2.cloudflarestorage.com/episodimira1"
 R2_ACCESS_KEY = "2c789715a2475c14e5d5acd2a828c63a"
