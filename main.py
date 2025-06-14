@@ -1,118 +1,80 @@
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
 import os
+import uuid
 import subprocess
-import threading
-import time
-import glob
-from pyftpdlib.handlers import FTPHandler
-from pyftpdlib.servers import FTPServer
-from pyftpdlib.authorizers import DummyAuthorizer
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import boto3
 from botocore.client import Config
 
-# Configurazione tramite variabili ambiente
-FTP_USER = os.getenv("FTP_USER", "user")
-FTP_PASS = os.getenv("FTP_PASS", "password")
-FTP_PORT = int(os.getenv("FTP_PORT", "21"))
+app = FastAPI()
 
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
-R2_ENDPOINT = os.getenv("R2_ENDPOINT")  # es: https://<account_id>.r2.cloudflarestorage.com
-R2_BUCKET = os.getenv("R2_BUCKET", "episodi")
+# Config Cloudflare R2
+R2_ENDPOINT = "https://<your-account-id>.r2.cloudflarestorage.com"
+R2_ACCESS_KEY = "<your-access-key>"
+R2_SECRET_KEY = "<your-secret-key>"
+R2_BUCKET = "<your-bucket-name>"
 
-UPLOAD_DIR = "/app/upload"
-OUTPUT_DIR = "/app/episodi"
-
-if not all([R2_ACCESS_KEY, R2_SECRET_KEY, R2_ENDPOINT]):
-    raise Exception("Variabili ambiente R2_ACCESS_KEY, R2_SECRET_KEY e R2_ENDPOINT devono essere impostate!")
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Setup client boto3 per R2
-s3_client = boto3.client(
+session = boto3.session.Session()
+s3 = session.client(
     "s3",
+    region_name="auto",
     endpoint_url=R2_ENDPOINT,
     aws_access_key_id=R2_ACCESS_KEY,
     aws_secret_access_key=R2_SECRET_KEY,
     config=Config(signature_version="s3v4"),
-    region_name="auto",
 )
 
-def upload_file_to_r2(local_path, remote_path):
-    print(f"Uploading {local_path} to R2 at {remote_path}...")
-    try:
-        s3_client.upload_file(local_path, R2_BUCKET, remote_path)
-        print(f"Uploaded {remote_path} successfully.")
-    except Exception as e:
-        print(f"Upload error: {e}")
+TMP_DIR = "/tmp/uploads"
 
-def convert_to_hls(filepath):
-    filename = os.path.basename(filepath)
-    episode_name = os.path.splitext(filename)[0]
-    episode_folder = os.path.join(OUTPUT_DIR, episode_name)
-    os.makedirs(episode_folder, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
 
-    hls_output = os.path.join(episode_folder, f"{episode_name}.m3u8")
-
+def convert_to_hls(input_path, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
     cmd = [
-        "ffmpeg", "-i", filepath,
-        "-profile:v", "baseline", "-level", "3.0",
+        "ffmpeg",
+        "-i", input_path,
+        "-codec:", "copy",
         "-start_number", "0",
         "-hls_time", "10",
         "-hls_list_size", "0",
         "-f", "hls",
-        hls_output
+        os.path.join(output_dir, "index.m3u8"),
     ]
+    subprocess.run(cmd, check=True)
 
-    print(f"Converting {filename} to HLS...")
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode == 0:
-        print(f"Conversion completed: {episode_name}")
-        # Upload all files in episode folder
-        files_to_upload = glob.glob(os.path.join(episode_folder, "*"))
-        for f in files_to_upload:
-            remote_path = f"{episode_name}/{os.path.basename(f)}"
-            upload_file_to_r2(f, remote_path)
-        # Optionally remove original video to save space
-        os.remove(filepath)
-    else:
-        print(f"Conversion error: {result.stderr.decode()}")
+def upload_folder_to_r2(folder_path, r2_folder):
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            full_path = os.path.join(root, file)
+            key = os.path.join(r2_folder, file)
+            s3.upload_file(full_path, R2_BUCKET, key)
 
-class UploadHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith(('.mp4', '.mov', '.mkv')):
-            print(f"New video detected: {event.src_path}")
-            # Run conversion in a separate thread to not block FTP
-            threading.Thread(target=convert_to_hls, args=(event.src_path,)).start()
+@app.post("/upload/")
+async def upload(files: list[UploadFile] = File(...)):
+    results = []
+    for file in files:
+        # salva file temporaneo
+        uid = str(uuid.uuid4())
+        video_path = os.path.join(TMP_DIR, f"{uid}_{file.filename}")
+        with open(video_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
 
-def start_ftp_server():
-    authorizer = DummyAuthorizer()
-    authorizer.add_user(FTP_USER, FTP_PASS, UPLOAD_DIR, perm="elradfmw")  # full permissions
-    handler = FTPHandler
-    handler.authorizer = authorizer
+        # crea cartella output HLS
+        hls_output = os.path.join(TMP_DIR, f"hls_{uid}")
+        convert_to_hls(video_path, hls_output)
 
-    server = FTPServer(("0.0.0.0", FTP_PORT), handler)
-    print(f"Starting FTP server on port {FTP_PORT} with user {FTP_USER}")
-    server.serve_forever()
+        # upload su R2
+        r2_folder = f"episodes/{uid}"
+        upload_folder_to_r2(hls_output, r2_folder)
 
-def start_watcher():
-    event_handler = UploadHandler()
-    observer = Observer()
-    observer.schedule(event_handler, UPLOAD_DIR, recursive=False)
-    observer.start()
-    print(f"Watching upload folder {UPLOAD_DIR} for new files...")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+        # pulizia
+        os.remove(video_path)
+        for root, _, files in os.walk(hls_output):
+            for f_name in files:
+                os.remove(os.path.join(root, f_name))
+        os.rmdir(hls_output)
 
-if __name__ == "__main__":
-    # Avvia FTP e watcher in thread separati
-    ftp_thread = threading.Thread(target=start_ftp_server, daemon=True)
-    ftp_thread.start()
+        results.append({"filename": file.filename, "r2_path": r2_folder})
 
-    start_watcher()
+    return JSONResponse({"uploaded": results})
