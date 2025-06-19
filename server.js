@@ -10,6 +10,9 @@ const { v4: uuidv4 } = require("uuid");
 const app = express();
 app.use(express.json());
 
+// Serve i file statici da public/ (dove metterai index.html)
+app.use(express.static(path.join(__dirname, "public")));
+
 const s3 = new AWS.S3({
   endpoint: process.env.R2_ENDPOINT,
   accessKeyId: process.env.R2_ACCESS_KEY,
@@ -21,12 +24,9 @@ const s3 = new AWS.S3({
 const mongoClient = new MongoClient(process.env.MONGO_URI);
 const R2_BUCKET = process.env.R2_BUCKET;
 
-// Route GET / per test / pagina base
-app.get("/", (req, res) => {
-  res.send("Server attivo! Usa POST /generate-presigned-url e POST /notify-upload");
-});
+// GET / ora serve index.html dalla cartella public automaticamente
 
-// Genera presigned URL per upload diretto su Cloudflare R2
+// POST per generare presigned URL per upload diretto su Cloudflare R2
 app.post("/generate-presigned-url", (req, res) => {
   const { filename, contentType } = req.body;
   if (!filename || !contentType) {
@@ -51,7 +51,7 @@ app.post("/generate-presigned-url", (req, res) => {
   });
 });
 
-// Endpoint che riceve notifica upload completato e fa processing + DB update
+// POST per notifica upload completato, processing e aggiornamento MongoDB
 app.post("/notify-upload", async (req, res) => {
   const { key, season, episodeNumber } = req.body;
   if (!key || !season || !episodeNumber) {
