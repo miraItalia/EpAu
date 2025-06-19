@@ -1,28 +1,15 @@
 const express = require("express");
-const multer = require("multer");
+const AWS = require("aws-sdk");
 const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const AWS = require("aws-sdk");
-const { v4: uuidv4 } = require("uuid");
+const axios = require("axios");
 const { MongoClient } = require("mongodb");
+const { v4: uuidv4 } = require("uuid");
 
-const upload = multer({
-  dest: "/tmp",
-  limits: { fileSize: 1024 * 1024 * 1024 } // 1 GB max
-});
 const app = express();
-const port = process.env.PORT || 3000;
+app.use(express.json());
 
-app.use(express.json({ limit: '1gb' }));
-app.use(express.urlencoded({ extended: true, limit: '1gb' }));
-
-// Serve index.html nella root
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
-// Config R2 (Cloudflare)
 const s3 = new AWS.S3({
   endpoint: process.env.R2_ENDPOINT,
   accessKeyId: process.env.R2_ACCESS_KEY,
@@ -31,102 +18,107 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
 });
 
-// Config MongoDB
 const mongoClient = new MongoClient(process.env.MONGO_URI);
 
-app.post("/upload", upload.single("video"), async (req, res) => {
-  const inputPath = req.file.path;
-  const fileSizeBytes = req.file.size;
-  const maxTotalBytes = 10 * 1024 * 1024 * 1024; // 10 GB limit
-  const { season, episodeNumber } = req.body;
+const R2_BUCKET = process.env.R2_BUCKET;
 
-  // Funzione ricorsiva per calcolare spazio usato nel bucket
-  let totalUsedBytes = 0;
-  const listAllObjects = async (ContinuationToken = null) => {
-    const params = {
-      Bucket: process.env.R2_BUCKET,
-      ContinuationToken,
-    };
-    const data = await s3.listObjectsV2(params).promise();
-    data.Contents.forEach(obj => totalUsedBytes += obj.Size);
-    if (data.IsTruncated) {
-      await listAllObjects(data.NextContinuationToken);
-    }
+app.post("/generate-presigned-url", (req, res) => {
+  const { filename, contentType } = req.body;
+  if (!filename || !contentType) return res.status(400).json({ error: "filename e contentType richiesti" });
+
+  const key = `uploads/${uuidv4()}-${filename}`;
+
+  const params = {
+    Bucket: R2_BUCKET,
+    Key: key,
+    Expires: 3600, // 1 ora validità
+    ContentType: contentType,
   };
 
-  try {
-    await listAllObjects();
-
-    if (totalUsedBytes + fileSizeBytes > maxTotalBytes) {
-      // Rimuovi file temporaneo e blocca
-      fs.unlinkSync(inputPath);
-      return res.status(413).send("❌ Spazio esaurito: superi i 10 GB disponibili.");
-    }
-  } catch (err) {
-    console.error("❌ Errore nel controllo spazio R2:", err);
-    return res.status(500).send("Errore nel controllo spazio R2");
-  }
-
-  // Rispondi subito al client
-  res.send("✅ Upload ricevuto. File in elaborazione...");
-
-  // Prepara output path e nome file R2
-  const outputPath = `/tmp/${uuidv4()}.mp4`;
-  const filename = `${uuidv4()}.mp4`;
-  const r2Key = `video/${filename}`;
-
-  // Esegui ffmpeg con flag faststart
-  exec(`ffmpeg -i ${inputPath} -movflags faststart -c copy ${outputPath}`, async (err) => {
+  s3.getSignedUrl("putObject", params, (err, url) => {
     if (err) {
-      console.error("❌ Errore FFMPEG:", err);
-      return;
+      console.error("Errore generazione presigned URL", err);
+      return res.status(500).json({ error: "Errore generazione URL" });
     }
-
-    const fileStream = fs.createReadStream(outputPath);
-
-    s3.upload({
-      Bucket: process.env.R2_BUCKET,
-      Key: r2Key,
-      Body: fileStream,
-      ContentType: "video/mp4",
-    }, async (err, data) => {
-      if (err) {
-        console.error("❌ Errore upload R2:", err);
-        return;
-      }
-
-      console.log("✅ Upload R2 riuscito:", data.Location);
-
-      // Aggiorna MongoDB
-      try {
-        await mongoClient.connect();
-        const db = mongoClient.db(); // usa DB default
-        const episodi = db.collection("supervideo_episodes");
-
-        const filter = {
-          season: parseInt(season),
-          episodeNumber: parseInt(episodeNumber),
-        };
-        const update = {
-          $set: {
-            videoUrl: data.Location,
-          },
-        };
-
-        const result = await episodi.updateOne(filter, update);
-
-        if (result.modifiedCount === 1) {
-          console.log("✅ Episodio aggiornato in MongoDB");
-        } else {
-          console.warn("⚠️ Nessun episodio aggiornato. Controlla i dati di stagione e episodio.");
-        }
-      } catch (mongoErr) {
-        console.error("❌ Errore MongoDB:", mongoErr);
-      } finally {
-        await mongoClient.close();
-      }
-    });
+    res.json({ uploadUrl: url, key });
   });
 });
 
-app.listen(port, () => console.log(`🚀 Server avviato su porta ${port}`));
+app.post("/notify-upload", async (req, res) => {
+  const { key, season, episodeNumber } = req.body;
+  if (!key || !season || !episodeNumber) {
+    return res.status(400).json({ error: "key, season e episodeNumber richiesti" });
+  }
+
+  const tempFilePath = path.join("/tmp", `${uuidv4()}.mp4`);
+  const processedFilePath = path.join("/tmp", `${uuidv4()}-processed.mp4`);
+
+  try {
+    // Scarica il file da R2
+    const fileUrl = `https://${R2_BUCKET}.${process.env.R2_ENDPOINT.replace("https://", "")}/${key}`;
+    const response = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "stream",
+    });
+
+    const writer = fs.createWriteStream(tempFilePath);
+    response.data.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
+
+    // Applica flag moov atom con ffmpeg
+    await new Promise((resolve, reject) => {
+      exec(`ffmpeg -i ${tempFilePath} -movflags faststart -c copy ${processedFilePath}`, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    // Carica file processato su R2 (stesso key per sovrascrivere)
+    const fileStream = fs.createReadStream(processedFilePath);
+    await s3
+      .putObject({
+        Bucket: R2_BUCKET,
+        Key: key,
+        Body: fileStream,
+        ContentType: "video/mp4",
+      })
+      .promise();
+
+    // Aggiorna MongoDB
+    await mongoClient.connect();
+    const db = mongoClient.db();
+    const episodi = db.collection("supervideo_episodes");
+
+    const filter = {
+      season: parseInt(season),
+      episodeNumber: parseInt(episodeNumber),
+    };
+    const update = {
+      $set: { videoUrl: fileUrl },
+    };
+
+    const result = await episodi.updateOne(filter, update);
+    if (result.modifiedCount !== 1) {
+      console.warn("Nessun episodio aggiornato, controlla season/episodeNumber");
+    }
+
+    res.json({ message: "Upload processato e DB aggiornato", videoUrl: fileUrl });
+  } catch (error) {
+    console.error("Errore processing upload:", error);
+    res.status(500).json({ error: "Errore durante processing" });
+  } finally {
+    try {
+      fs.unlinkSync(tempFilePath);
+      fs.unlinkSync(processedFilePath);
+      await mongoClient.close();
+    } catch {}
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server avviato su porta ${port}`));
