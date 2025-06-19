@@ -1,4 +1,12 @@
 <form method="POST" action="/upload" enctype="multipart/form-data">
-  <input type="file" name="video" accept="video/*" />
+  <label>Video:</label>
+  <input type="file" name="video" accept="video/*" required /><br /><br />
+
+  <label>Stagione:</label>
+  <input type="number" name="season" required /><br /><br />
+
+  <label>Episodio:</label>
+  <input type="number" name="episodeNumber" required /><br /><br />
+
   <button type="submit">Carica</button>
 </form>
