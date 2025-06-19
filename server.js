@@ -7,11 +7,15 @@ const AWS = require("aws-sdk");
 const { v4: uuidv4 } = require("uuid");
 const { MongoClient } = require("mongodb");
 
-const upload = multer({ dest: "/tmp" });
+const upload = multer({
+  dest: "/tmp",
+  limits: { fileSize: 1024 * 1024 * 1024 } // 1 GB max
+});
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '1gb' }));
+app.use(express.urlencoded({ extended: true, limit: '1gb' }));
 
 // Serve index.html nella root
 app.get("/", (req, res) => {
