@@ -19,12 +19,19 @@ const s3 = new AWS.S3({
 });
 
 const mongoClient = new MongoClient(process.env.MONGO_URI);
-
 const R2_BUCKET = process.env.R2_BUCKET;
 
+// Route GET / per test / pagina base
+app.get("/", (req, res) => {
+  res.send("Server attivo! Usa POST /generate-presigned-url e POST /notify-upload");
+});
+
+// Genera presigned URL per upload diretto su Cloudflare R2
 app.post("/generate-presigned-url", (req, res) => {
   const { filename, contentType } = req.body;
-  if (!filename || !contentType) return res.status(400).json({ error: "filename e contentType richiesti" });
+  if (!filename || !contentType) {
+    return res.status(400).json({ error: "filename e contentType richiesti" });
+  }
 
   const key = `uploads/${uuidv4()}-${filename}`;
 
@@ -44,6 +51,7 @@ app.post("/generate-presigned-url", (req, res) => {
   });
 });
 
+// Endpoint che riceve notifica upload completato e fa processing + DB update
 app.post("/notify-upload", async (req, res) => {
   const { key, season, episodeNumber } = req.body;
   if (!key || !season || !episodeNumber) {
