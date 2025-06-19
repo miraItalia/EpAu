@@ -1,12 +1,50 @@
-<form method="POST" action="/upload" enctype="multipart/form-data">
-  <label>Video:</label>
-  <input type="file" name="video" accept="video/*" required /><br /><br />
+<input type="file" id="fileInput" accept="video/*" />
+<input type="number" id="seasonInput" placeholder="Stagione" />
+<input type="number" id="episodeInput" placeholder="Episodio" />
+<button id="uploadBtn">Carica</button>
 
-  <label>Stagione:</label>
-  <input type="number" name="season" required /><br /><br />
+<script>
+  document.getElementById("uploadBtn").onclick = async () => {
+    const file = document.getElementById("fileInput").files[0];
+    const season = document.getElementById("seasonInput").value;
+    const episodeNumber = document.getElementById("episodeInput").value;
 
-  <label>Episodio:</label>
-  <input type="number" name="episodeNumber" required /><br /><br />
+    if (!file || !season || !episodeNumber) {
+      alert("Seleziona file, stagione e episodio");
+      return;
+    }
 
-  <button type="submit">Carica</button>
-</form>
+    // 1) Chiedi presigned URL
+    const res1 = await fetch("/generate-presigned-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, contentType: file.type }),
+    });
+    const { uploadUrl, key } = await res1.json();
+
+    // 2) Carica direttamente su R2
+    const res2 = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": file.type },
+      body: file,
+    });
+    if (!res2.ok) {
+      alert("Upload fallito");
+      return;
+    }
+
+    // 3) Notifica backend che upload è finito e passa dati
+    const res3 = await fetch("/notify-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, season, episodeNumber }),
+    });
+    const data3 = await res3.json();
+
+    if (res3.ok) {
+      alert("Upload completato e video processato!");
+    } else {
+      alert("Errore: " + data3.error);
+    }
+  };
+</script>
