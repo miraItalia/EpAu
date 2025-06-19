@@ -97,7 +97,7 @@ app.post("/upload", upload.single("video"), async (req, res) => {
       try {
         await mongoClient.connect();
         const db = mongoClient.db(); // usa DB default
-        const episodi = db.collection("episodi");
+        const episodi = db.collection("supervideo_episodes");
 
         const filter = {
           season: parseInt(season),
